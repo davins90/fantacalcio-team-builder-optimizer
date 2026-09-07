@@ -146,3 +146,33 @@ def test_tactics_depth_and_formations():
     f433 = next(f for f in fmts if f["name"] == "4-3-3")
     assert any("Dc" in m for m in f433["missing"])
 
+
+def test_formations_do_not_double_count_players():
+    """A player must fill at most one slot of the XI."""
+    from engine.tactics import evaluate_formations
+
+    def p(name, roles):
+        return {"name": name, "roles": roles, "team": "X", "fvm": 10, "expected_fp": 100}
+
+    # 11 players but only two midfielders, while 4-3-3 needs M/C x1 + C x2.
+    short_midfield = pd.DataFrame([
+        p("Por1", "Por"), p("Dd1", "Dd"), p("Dc1", "Dc"), p("Dc2", "Dc"), p("Ds1", "Ds"),
+        p("C1", "C"), p("C2", "C"), p("W1", "W"), p("W2", "W"), p("Pc1", "Pc"), p("Dc3", "Dc"),
+    ])
+    f433 = next(f for f in evaluate_formations(short_midfield) if f["name"] == "4-3-3")
+    assert not f433["playable"]
+    assert f433["starters_covered"] == 10
+    assert f433["missing"]
+
+    # Adding a genuine third midfielder makes the XI fieldable.
+    full = pd.DataFrame(short_midfield.to_dict("records")[:-1] + [p("M1", "M")])
+    f433_ok = next(f for f in evaluate_formations(full) if f["name"] == "4-3-3")
+    assert f433_ok["playable"]
+    assert f433_ok["missing"] == []
+
+    # Multi-role players must still be usable for whichever slot the XI needs.
+    versatile = pd.DataFrame([
+        p("Por1", "Por"), p("Dd1", "Dd"), p("Dc1", "Dc"), p("Dc2", "Dc"), p("Ds1", "Ds"),
+        p("MC1", "M/C"), p("C1", "C"), p("C2", "C"), p("W1", "W"), p("W2", "W/A"), p("APc", "A/Pc"),
+    ])
+    assert next(f for f in evaluate_formations(versatile) if f["name"] == "4-3-3")["playable"]

@@ -152,11 +152,11 @@ if page == "Asta live":
         if role_filter == "🧤 Portieri":
             filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\bPor\b")]
         elif role_filter == "🛡️ Difesa (D/E)":
-            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(Dc|Dd|Ds|B|E)\b")]
+            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(?:Dc|Dd|Ds|B|E)\b")]
         elif role_filter == "⚙️ Centro (M/C)":
-            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(M|C)\b")]
+            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(?:M|C)\b")]
         elif role_filter == "🎯 Attacco (W/T/A/Pc)":
-            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(W|T|A|Pc)\b")]
+            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(?:W|T|A|Pc)\b")]
 
         if team_filter != "TUTTE":
             filtered_available = filtered_available[filtered_available["team"] == team_filter]
