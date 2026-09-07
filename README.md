@@ -2,7 +2,7 @@
 
 Assistente live decision-support per l'asta del **Fantacalcio Mantra**, progettato per guidare le decisioni in tempo reale secondo principi di **Modern Portfolio Theory**, **Ricerca Operativa (MILP)** e **Statistica Bayesiana**.
 
-Configurazione di riferimento predefinita: **10 partecipanti / 500 crediti / 25 giocatori per rosa** (completamente personalizzabile da interfaccia).
+Configurazione di riferimento predefinita: **10 partecipanti / 500 crediti / 25 giocatori per rosa** (completamente personalizzabile da interfaccia, incluso il *peso della panchina* λ che governa quanto concentrare il budget sui titolari).
 
 ---
 
@@ -29,7 +29,7 @@ L'app aggiorna all'istante:
 - La liquidità aggregata di tutti gli avversari;
 - L'inflazione empirica per singolo ruolo Mantra;
 - L'indice di scarsità del talento titolare rimasto;
-- Il portafoglio ottimale aggiornato e l'**esposizione target** di ogni giocatore;
+- Il portafoglio ottimale aggiornato, il **modulo Mantra** verso cui conviene costruire, l'**undici titolare target** e l'**esposizione** di ogni giocatore;
 - Il **MAX BID dinamico e matematicamente vincolato** (non superabile per legge di bilancio);
 - I **prossimi target consigliati** e le chiamate strategiche di **budget-drain** (chiamare top player costosi non target per far prosciugare i crediti avversari).
 
@@ -49,7 +49,8 @@ Il motore analitico è strutturato in 4 livelli rigorosamente integrati:
   (Base Price + Bayesian Role Inflation + Scarcity + Liquidity + Fit)
                         ↓
             3. PORTFOLIO OPTIMIZER
-  (Mixed-Integer Linear Programming HiGHS + Monte Carlo Perturbations)
+  (Best-XI MILP HiGHS: rosa + modulo + undici titolare
+   + Monte Carlo su rilassamento LP per la portfolio exposure)
                         ↓
               4. LIVE ADVISOR
   (Dynamic Fair Value + Legal Max Bid + Next Calls + Budget Drain)
@@ -96,28 +97,79 @@ La proiezione dei punti fantacalcio non si basa su semplici medie storiche, ma i
 
 ---
 
-### 3. Portfolio Optimizer: Programmazione Lineare Intera (MILP)
+### 3. Portfolio Optimizer: il Miglior Undici, non la Somma dei 25
 
-L'allocazione della rosa ideale viene risolta in meno di 20 millisecondi tramite il solutore **HiGHS** integrato in `scipy.optimize.milp`:
+Al Fantacalcio si schierano **11 giocatori su 25**. Un ottimizzatore che massimizza la somma degli Expected FP dell'intera rosa attribuisce quindi al 25° rincalzo — che non scenderà mai in campo — lo stesso peso dell'attaccante titolare. Con un budget di 500 crediti da spalmare su 25 slot, quella formulazione conduce sistematicamente a una sola conclusione: **nessun top player è mai conveniente**.
 
-$$\max_{x \in \{0, 1\}^N} \sum_{i=1}^N \left( FP_i - c_r \cdot \text{Risk}_i + c_u \cdot \text{Upside}_i + c_v \cdot \text{Value}_i + \epsilon_i \right) x_i$$
+L'effetto era misurabile e severo: sul listone ufficiale 2026/27 l'esposizione di *ogni* giocatore sopra FVM 100 (Malen, Martinez L., Calhanoglu, Hojlund, Thuram, Paz N.) risultava esattamente $0.00$ su tutti gli scenari, e la rosa ottima era composta da 25 giocatori pressoché identici da ~20 crediti.
 
-Sotto i vincoli vincolanti:
-1. **Completamento rosa:** $\sum x_i = \text{Slot Residui}$;
-2. **Budget residuo:** $\sum \text{PrezzoDinamico}_i \cdot x_i \le \text{Budget Residuo}$;
-3. **Portieri esatti:** Esattamente $3$ portieri totali in rosa (mai più di 3!);
-4. **Copertura Tattica Mantra Integrale:**
+Il modello attuale ottimizza invece il **miglior undici schierabile**, trattando la panchina come un bene complementare pesato $\lambda$.
+
+#### Formulazione
+
+Tre famiglie di variabili binarie:
+
+| Variabile | Significato |
+| --- | --- |
+| $x_i$ | il giocatore $i$ fa parte dei 25 |
+| $m_f$ | $f$ è il modulo Mantra verso cui si costruisce (**variabile decisionale**, non un'assunzione) |
+| $w_{i,g}$ | il giocatore $i$ occupa uno slot del gruppo di requisiti $g$ dell'undici |
+
+$$\max \; \sum_{i=1}^N \Big( \lambda \cdot FP_i - c_r \text{Risk}_i + c_u \text{Upside}_i + c_v \text{Value}_i + \epsilon_i \Big) x_i \; + \sum_{(i,g)} (1-\lambda) \cdot FP_i \cdot w_{i,g}$$
+
+Un **titolare vale i suoi Expected FP pieni**; un rincalzo solo la frazione $\lambda$.
+
+Sotto i vincoli:
+
+1. **Completamento rosa:** $\sum_i x_i = 25$, con $x_i = 1$ fissato per i giocatori **già acquistati** (che sono costo affondato e non consumano budget residuo);
+2. **Budget residuo:** $\sum_i \text{PrezzoDinamico}_i \cdot x_i \le \text{Budget Residuo}$, sommato sui soli giocatori ancora disponibili;
+3. **Modulo unico:** $\sum_f m_f = 1$;
+4. **Portieri esatti:** esattamente $3$ portieri totali in rosa (mai più di 3!);
+5. **Copertura Tattica Mantra Integrale** sui 25 (panchina inclusa):
    - Difesa centrale: almeno $4$ difensori centrali `Dc`;
    - Fascia destra: almeno $2$ terzini destri `Dd`;
    - Fascia sinistra: almeno $2$ terzini sinistri `Ds`;
    - Esterni di centrocampo: almeno $2$ esterni `E` o ali `W`;
    - Mediana: almeno $2$ mediani `M`;
    - Regia/Mezzali: almeno $3$ centrocampisti `C`;
-   - **Prime Punte di ruolo:** almeno $2$ centravanti `Pc` garantiti (evita rose sbilanciate prive di prime punte);
+   - **Prime Punte di ruolo:** almeno $2$ centravanti `Pc` garantiti;
    - Rifinitura/Attacco: almeno $3$ giocatori tra `W`, `T` e `A`;
-5. **Diversificazione reale:** Massimo 4 giocatori dello stesso club di Serie A.
+6. **Diversificazione reale:** massimo 4 giocatori dello stesso club di Serie A;
+7. **Capienza degli slot:** $\sum_i w_{i,g} = \text{count}_g \cdot m_{f(g)}$ — ogni gruppo di requisiti del modulo scelto va riempito esattamente;
+8. **Un giocatore, uno slot:** $\sum_g w_{i,g} \le x_i$.
 
-**Portfolio Exposure:** Il modello esegue perturbazioni Monte Carlo sulle proiezioni per determinare in quale percentuale di scenari ottimali un giocatore compare nella tua rosa target.
+Il vincolo (8) è la parte non negoziabile: è un **matching bipartito** giocatori→slot, **lo stesso** che `engine/tactics.py` usa per il semaforo dei moduli nella pagina *La mia rosa*. Ottimizzatore e interfaccia condividono così un'unica definizione di "undici schierabile". Senza di esso lo stesso giocatore coprirebbe più caselle contemporaneamente e il solutore costruirebbe formazioni impossibili da mandare in campo.
+
+#### Il parametro λ (peso della panchina)
+
+Regolabile da **Dati & setup**, default $\lambda = 0.30$. Misurato sul listone reale a parità di budget:
+
+| $\lambda$ | FP del miglior XI | Prezzo max | Giocatori > 40 cr | Carattere |
+| --- | --- | --- | --- | --- |
+| — *(vecchio obiettivo)* | 1283 | 25 | 0 | rosa piatta, nessun titolare vero |
+| $0.05$ | 1825 | 72 | 7 | aggressivo, panchina fragile |
+| **$0.30$** | **1760** | **49** | **7** | **equilibrato (default)** |
+| $0.60$ | 1532 | 39 | 0 | prudente, robusto alle assenze |
+
+Il passaggio all'obiettivo best-XI vale **+37% di Expected FP sull'undici titolare** rispetto alla formulazione precedente, a parità di crediti spesi. Sotto $\lambda \approx 0.30$ il guadagno sull'XI si appiattisce mentre la panchina si assottiglia rapidamente: è il punto di equilibrio consigliato.
+
+#### Portfolio Exposure e prestazioni
+
+L'esposizione nasce da perturbazioni Monte Carlo sulle proiezioni ($\epsilon_i \sim \mathcal{N}(0, 0.12 \cdot \sigma_i)$), che misurano in quale frazione degli scenari un giocatore rientra nella rosa target.
+
+Il MILP esatto risolve in $\approx 1.2$ s su 531 giocatori (~5.000 variabili binarie), troppo per rieseguirlo a ogni simulazione. Su questo modello — la cui struttura è dominata dal matching di assegnamento — il **rilassamento LP risulta però intero e coincide con l'ottimo** (verificato: zero variabili frazionarie, stesso valore obiettivo, top-25 identica) risolvendo in $\approx 0.08$ s. Le simulazioni usano quindi l'LP, il MILP resta per la rosa consigliata: `analyze_auction` completa in **2-3 secondi** anche a listone pieno.
+
+---
+
+### Analisi Tattica della Rosa (`engine/tactics.py`)
+
+La pagina *La mia rosa* valuta la rosa contro i **7 moduli ufficiali Mantra** (`4-3-3`, `4-2-3-1`, `3-4-2-1`, `3-5-2`, `4-3-1-2`, `3-4-3`, `4-4-2`).
+
+Per ciascun modulo i gruppi di requisiti vengono espansi negli 11 slot individuali e si calcola il **matching bipartito massimo** giocatori→slot (algoritmo di Kuhn con cammini aumentanti, `_max_assignment`). Un modulo è `playable` solo se tutti e 11 gli slot trovano un titolare distinto.
+
+> Contare i giocatori idonei gruppo per gruppo, in modo indipendente, **non** è sufficiente: una rosa con due soli centrocampisti `C` soddisferebbe contemporaneamente sia `C ×2` sia `M/C ×1` del 4-3-3, risultando erroneamente schierabile con 2 uomini per 3 caselle. Il matching elimina il doppio conteggio.
+
+La pagina restituisce inoltre il **depth chart** per ruolo Mantra e la percentuale di copertura di ogni modulo, pesata per la profondità della rosa.
 
 ---
 
@@ -137,6 +189,21 @@ Durante la chiamata di un calciatore, l'Advisor determina:
    - 🚫 **ROSA COMPLETA / OUT OF BUDGET**: avvisi espliciti di sicurezza.
 4. **Strategia "Budget Drain":**
    Individua i giocatori con alto costo dinamico che il modello **non** vuole acquistare. Chiamare questi giocatori costringe gli avversari a consumare liquidità preziosa su profili inefficienti.
+
+---
+
+## 🖥️ Interfaccia
+
+| Sezione | Cosa trovi |
+| --- | --- |
+| **Asta live** | Selettore del giocatore chiamato con **filtri rapidi per reparto e per squadra**, scheda del consiglio (fair value, max bid, exposure, segnale operativo) e registrazione della vendita con **pulsanti quick-bid** (prezzo 1 · al max bid · al fair value). |
+| **Chi chiamo?** | Target consigliati, **l'undici verso cui stai costruendo** con il modulo Mantra scelto dall'ottimizzatore e il segno ✅ sui giocatori già tuoi, chiamate di budget-drain. |
+| **La mia rosa** | Metriche di rosa e budget, **compatibilità con i 7 moduli ufficiali Mantra** (semaforo + ruoli ancora scoperti) e **depth chart** per ruolo. |
+| **Mercato** | Inflazione per ruolo, liquidità della lega e storico delle vendite registrate. |
+| **Dati & setup** | Configurazione lega, **slider del peso panchina λ**, scommesse su club e caricamento di un nuovo listone. |
+| **Modello** | Spiegazione discorsiva di come ragiona il motore. |
+
+> **Nota operativa.** Il `max_bid` è deliberatamente prudente: resta entro circa $\pm 20\%$ dal prezzo di listino FVM. Serve a impedirti di sforare il budget e a dirti *su chi* concentrare la spesa, non a segnalare affari da pagare il doppio. Su un giocatore dell'undici target, arrivare al tetto consigliato e rilanciare ancora un po' è una scelta ragionevole.
 
 ---
 
@@ -195,6 +262,11 @@ uv run --with streamlit --with beautifulsoup4 --with lxml --with openpyxl stream
 Il progetto include una suite di test approfondita in `tests/`:
 
 ```bash
+pip install -r requirements-dev.txt
+PYTHONPATH=. pytest -v
+```
+oppure con `uv`:
+```bash
 PYTHONPATH=. uv run --with pytest --with beautifulsoup4 --with lxml --with openpyxl pytest -v
 ```
 
@@ -205,4 +277,10 @@ La suite valida:
 - Tetto esatto di 3 portieri nel modello di ottimizzazione;
 - Presenza obbligatoria delle prime punte `Pc`;
 - Rispetto rigoroso del vincolo di bilancio su `max_bid`;
+- **Undici realmente schierabile**: l'ottimizzatore produce 11 titolari distinti, sottoinsieme dei 25, su un modulo che `evaluate_formations` conferma `playable`;
+- **Effetto di λ**: un peso panchina più basso concentra effettivamente la spesa sui titolari;
+- **Giocatori già acquistati** mantenuti in rosa e giocatori venduti agli avversari esclusi dal pool;
+- **Nessun doppio conteggio nei moduli**: rosa incompleta non schierabile, rosa completa schierabile, polivalenti (`A/Pc`, `M/C`) utilizzabili sullo slot che serve;
 - Persistenza dello stato e del dataset su storage locale e Firestore.
+
+Le pagine Streamlit sono verificate end-to-end con `streamlit.testing.v1.AppTest`.
