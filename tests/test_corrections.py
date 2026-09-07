@@ -118,3 +118,31 @@ def test_local_state_store_preserves_dataset(tmp_path):
     assert loaded_df is not None
     assert len(loaded_df) == 1
     assert loaded_df.iloc[0]["name"] == "test"
+
+
+def test_tactics_depth_and_formations():
+    from engine.tactics import compute_roster_depth, evaluate_formations
+    roster = pd.DataFrame([
+        {"name": "Svilar", "roles": "Por", "team": "Roma", "fvm": 80, "expected_fp": 140},
+        {"name": "Bastoni", "roles": "Dc", "team": "Inter", "fvm": 50, "expected_fp": 120},
+        {"name": "Di Lorenzo", "roles": "Dd/E", "team": "Napoli", "fvm": 40, "expected_fp": 110},
+        {"name": "Tavares", "roles": "Ds/E", "team": "Lazio", "fvm": 30, "expected_fp": 90},
+        {"name": "Calhanoglu", "roles": "M/C", "team": "Inter", "fvm": 70, "expected_fp": 150},
+        {"name": "Samardzic", "roles": "C/T", "team": "Atalanta", "fvm": 50, "expected_fp": 120},
+        {"name": "Politano", "roles": "W", "team": "Napoli", "fvm": 40, "expected_fp": 110},
+        {"name": "Zaccagni", "roles": "W/A", "team": "Lazio", "fvm": 60, "expected_fp": 130},
+        {"name": "Kean", "roles": "Pc", "team": "Fiorentina", "fvm": 70, "expected_fp": 140},
+    ])
+    depth = compute_roster_depth(roster)
+    assert len(depth["Por"]) == 1
+    assert len(depth["Dd"]) == 1
+    assert len(depth["Ds"]) == 1
+    assert len(depth["Pc"]) == 1
+
+    fmts = evaluate_formations(roster)
+    assert len(fmts) >= 5
+    assert any("4-3-3" in f["name"] for f in fmts)
+    # Check that missing positions are properly flagged when squad has only 1 Dc
+    f433 = next(f for f in fmts if f["name"] == "4-3-3")
+    assert any("Dc" in m for m in f433["missing"])
+

@@ -9,8 +9,10 @@ import streamlit as st
 from engine.advisor import analyze_auction, player_advice
 from engine.config import AuctionConfig
 from engine.data_loader import DataHealth, load_bundled_dataset, load_remote_dataset, load_uploaded
-from engine.projections import compute_team_factors
+from engine.projections import compute_team_factors, project_players
+from engine.tactics import compute_roster_depth, evaluate_formations
 from storage.store import get_store
+
 
 st.set_page_config(page_title="FantaMantra Portfolio", page_icon="⚽", layout="wide")
 
@@ -109,10 +111,19 @@ if players_raw is None and page != "Dati & setup":
                 st.info("Vai in **Dati & setup** e carica un listone Excel/CSV ufficiale.")
                 st.stop()
 
+@st.cache_data(show_spinner=False)
+def _get_cached_projections(df: pd.DataFrame, overweights: tuple[str, ...], premium: float) -> pd.DataFrame:
+    return project_players(df, list(overweights), premium)
+
+
 analysis = None
 if players_raw is not None and not players_raw.empty and page not in ["Dati & setup", "Modello"]:
     with st.spinner("Ricalcolo portafogli e stato dell'asta…"):
-        analysis = analyze_auction(players_raw, events, config, state.get("manual_overweights", []))
+        projected_cached = _get_cached_projections(
+            players_raw, tuple(state.get("manual_overweights", [])), config.manual_team_premium
+        )
+        analysis = analyze_auction(projected_cached, events, config, state.get("manual_overweights", []))
+
 
 
 if page == "Asta live":
@@ -127,13 +138,40 @@ if page == "Asta live":
     if available.empty:
         st.success("Asta completata o nessun giocatore disponibile.")
     else:
-        selected_label = st.selectbox(
-            "Giocatore chiamato",
-            options=available["name_norm"].tolist(),
-            format_func=lambda x: f"{available.loc[available['name_norm'].eq(x), 'name'].iloc[0]} · {available.loc[available['name_norm'].eq(x), 'roles'].iloc[0]} · {available.loc[available['name_norm'].eq(x), 'team'].iloc[0]}",
-            index=None,
-            placeholder="Scrivi il nome del giocatore…",
+        f_col1, f_col2 = st.columns([3, 1])
+        role_filter = f_col1.radio(
+            "Filtro rapido reparto:",
+            ["TUTTI", "🧤 Portieri", "🛡️ Difesa (D/E)", "⚙️ Centro (M/C)", "🎯 Attacco (W/T/A/Pc)"],
+            horizontal=True,
+            index=0,
         )
+        all_teams = sorted([t for t in available["team"].dropna().unique() if t and t != "nan"])
+        team_filter = f_col2.selectbox("Filtra squadra:", ["TUTTE"] + all_teams, index=0)
+
+        filtered_available = available.copy()
+        if role_filter == "🧤 Portieri":
+            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\bPor\b")]
+        elif role_filter == "🛡️ Difesa (D/E)":
+            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(Dc|Dd|Ds|B|E)\b")]
+        elif role_filter == "⚙️ Centro (M/C)":
+            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(M|C)\b")]
+        elif role_filter == "🎯 Attacco (W/T/A/Pc)":
+            filtered_available = filtered_available[filtered_available["roles"].str.contains(r"\b(W|T|A|Pc)\b")]
+
+        if team_filter != "TUTTE":
+            filtered_available = filtered_available[filtered_available["team"] == team_filter]
+
+        if filtered_available.empty:
+            st.info("Nessun giocatore disponibile con i filtri selezionati.")
+            selected_label = None
+        else:
+            selected_label = st.selectbox(
+                f"Giocatore chiamato ({len(filtered_available)} disponibili)",
+                options=filtered_available["name_norm"].tolist(),
+                format_func=lambda x: f"{filtered_available.loc[filtered_available['name_norm'].eq(x), 'name'].iloc[0]} · {filtered_available.loc[filtered_available['name_norm'].eq(x), 'roles'].iloc[0]} · {filtered_available.loc[filtered_available['name_norm'].eq(x), 'team'].iloc[0]}",
+                index=None,
+                placeholder="Scrivi o seleziona il nome del giocatore…",
+            )
         if selected_label:
             adv = player_advice(analysis, selected_label)
             if adv:
@@ -162,11 +200,23 @@ if page == "Asta live":
                 m3.caption(f"FM proiettata: {adv['projected_fm']:.2f}")
 
                 st.markdown("#### Registra la vendita")
+                q_cols = st.columns(3)
+                if q_cols[0].button("🏷️ Prezzo = 1", use_container_width=True):
+                    st.session_state["quick_val"] = 1
+                if q_cols[1].button(f"🎯 Al Max Bid ({adv['max_bid']})", use_container_width=True):
+                    st.session_state["quick_val"] = max(1, adv["max_bid"])
+                if q_cols[2].button(f"📊 Al Fair Value ({adv['fair_value']:.0f})", use_container_width=True):
+                    st.session_state["quick_val"] = max(1, int(round(adv["fair_value"])))
+
+                current_default = st.session_state.pop("quick_val", None)
+                if current_default is None:
+                    current_default = max(1, min(adv["max_bid"] or 1, config.starting_budget))
+
                 with st.form("sale_form", clear_on_submit=True):
-                    initial_val = max(1, min(adv["max_bid"] or 1, config.starting_budget))
-                    final_price = st.number_input("Prezzo finale", min_value=1, max_value=config.starting_budget, value=initial_val, step=1)
+                    final_price = st.number_input("Prezzo finale", min_value=1, max_value=config.starting_budget, value=current_default, step=1)
                     mine = st.radio("Acquirente", ["ALTRI", "MIO"], horizontal=True)
                     submitted = st.form_submit_button("Registra acquisto", use_container_width=True)
+
                     if submitted:
                         slots_left = config.roster_size - len(analysis["my_roster"])
                         if mine == "MIO" and slots_left <= 0:
@@ -228,20 +278,91 @@ elif page == "La mia rosa":
     st.title("La mia rosa")
     roster = analysis["my_roster"].copy()
     if roster.empty:
-        st.info("Non hai ancora registrato acquisti tuoi.")
+        st.info("Non hai ancora registrato acquisti tuoi. Quando compri un giocatore nell'Asta live selezionando 'MIO', apparirà qui.")
     else:
         ev = pd.DataFrame([e for e in events if e.get("mine")])[["name_norm", "price"]]
         roster = roster.merge(ev, on="name_norm", how="left")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Giocatori", f"{len(roster)}/{config.roster_size}")
+        c2.metric("Speso", f"{analysis['my_spend']:.0f}")
+        c3.metric("Budget residuo", f"{analysis['my_budget_left']:.0f}")
+        c4.metric("Expected FP totali", f"{roster['expected_fp'].sum():.0f}")
+
+        st.markdown("### 📐 Compatibilità Moduli Ufficiali Mantra")
+        fmts = evaluate_formations(roster)
+        f_cols = st.columns(min(4, len(fmts)))
+        for idx in range(min(4, len(fmts))):
+            fmt = fmts[idx]
+            with f_cols[idx]:
+                icon = "🟢" if fmt["playable"] else "🟡" if fmt["score"] >= 65 else "🔴"
+                st.metric(label=f"{icon} {fmt['name']}", value=f"{fmt['score']}%")
+                if fmt["playable"]:
+                    st.success("Titolari coperti!")
+                else:
+                    st.caption("Mancano: " + ", ".join(fmt["missing"][:2]))
+
+        with st.expander("🔍 Dettaglio di tutti i moduli Mantra"):
+            for fmt in fmts:
+                status_icon = "🟢" if fmt["playable"] else "🟡" if fmt["score"] >= 65 else "🔴"
+                st.markdown(f"**{status_icon} {fmt['name']}** — *{fmt['description']}* (Copertura: **{fmt['score']}%**)")
+                if fmt["missing"]:
+                    st.caption("Ruoli ancora scoperti per gli 11 titolari: " + "; ".join(fmt["missing"]))
+
+        st.divider()
+        st.markdown("### 📋 Depth Chart Ruoli Mantra")
+        depth = compute_roster_depth(roster)
+        d1, d2, d3, d4, d5 = st.columns(5)
+        with d1:
+            st.markdown(f"**🧤 Portieri ({len(depth['Por'])}/3)**")
+            for p in depth["Por"]:
+                st.caption(f"• {p['name']} ({p['team']})")
+            if len(depth["Por"]) < 3:
+                st.warning(f"⚠️ Mancano {3 - len(depth['Por'])}")
+
+        with d2:
+            st.markdown(f"**🛡️ Centrali ({len(depth['Dc'])})**")
+            for p in depth["Dc"]:
+                st.caption(f"• {p['name']} ({p['team']})")
+            if len(depth["Dc"]) < 4:
+                st.warning(f"⚠️ Min. 4 (hai {len(depth['Dc'])})")
+
+        with d3:
+            st.markdown("**⚡ Fasce Esterne**")
+            st.caption(f"**Dd ({len(depth['Dd'])}):** " + (", ".join([p["name"] for p in depth["Dd"]]) if depth["Dd"] else "⚠️ Nessuno"))
+            st.caption(f"**Ds ({len(depth['Ds'])}):** " + (", ".join([p["name"] for p in depth["Ds"]]) if depth["Ds"] else "⚠️ Nessuno"))
+            st.caption(f"**E ({len(depth['E'])}):** " + (", ".join([p["name"] for p in depth["E"]]) if depth["E"] else "—"))
+
+        with d4:
+            st.markdown("**⚙️ Centrocampo**")
+            st.caption(f"**M ({len(depth['M'])}):** " + (", ".join([p["name"] for p in depth["M"]]) if depth["M"] else "⚠️ Nessun M"))
+            st.caption(f"**C ({len(depth['C'])}):** " + (", ".join([p["name"] for p in depth["C"]]) if depth["C"] else "—"))
+
+        with d5:
+            st.markdown("**🎯 Attacco**")
+            st.caption(f"**Pc ({len(depth['Pc'])}):** " + (", ".join([p["name"] for p in depth["Pc"]]) if depth["Pc"] else "🚨 Nessuna punta!"))
+            st.caption(f"**T ({len(depth['T'])}):** " + (", ".join([p["name"] for p in depth["T"]]) if depth["T"] else "—"))
+            st.caption(f"**A ({len(depth['A'])}):** " + (", ".join([p["name"] for p in depth["A"]]) if depth["A"] else "—"))
+            st.caption(f"**W ({len(depth['W'])}):** " + (", ".join([p["name"] for p in depth["W"]]) if depth["W"] else "—"))
+
+        st.divider()
+        st.markdown("### 👥 Tutti i Giocatori Acquistati")
         st.dataframe(roster[["name", "team", "roles", "price", "expected_fp", "risk"]].rename(columns={
             "name":"Giocatore", "team":"Squadra", "roles":"Ruoli", "price":"Prezzo", "expected_fp":"Expected FP", "risk":"Rischio"
         }), use_container_width=True, hide_index=True)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Speso", f"{analysis['my_spend']:.0f}")
-        c2.metric("Budget residuo", f"{analysis['my_budget_left']:.0f}")
-        c3.metric("Expected FP proxy", f"{roster['expected_fp'].sum():.0f}")
-        st.markdown("### Esposizione per club")
+
+        st.markdown("### 🏟️ Esposizione per club")
         team_exp = roster.groupby("team").agg(Giocatori=("name", "count"), Expected_FP=("expected_fp", "sum")).sort_values("Giocatori", ascending=False)
         st.dataframe(team_exp, use_container_width=True)
+
+        csv_roster = roster[["name", "team", "roles", "price", "expected_fp", "risk"]].to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "📥 Scarica la mia rosa (.csv)",
+            data=csv_roster,
+            file_name=f"la_mia_rosa_mantra_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 
 elif page == "Mercato":
@@ -257,13 +378,53 @@ elif page == "Mercato":
     else:
         market_df["Inflazione"] = (market_df["Inflazione posterior"] * 100).round(1).astype(str) + "%"
         st.dataframe(market_df[["Ruolo", "Osservazioni", "Inflazione"]].sort_values("Osservazioni", ascending=False), use_container_width=True, hide_index=True)
-    st.markdown("### Liquidità aggregata")
+
+    st.markdown("### 💰 Liquidità aggregata")
     spent_others = analysis["market_spend"] - analysis["my_spend"]
     avg_other_budget = (config.starting_budget * (config.participants - 1) - spent_others) / max(1, config.participants - 1)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Spesa totale", f"{analysis['market_spend']:.0f}")
-    c2.metric("Spesa altri", f"{spent_others:.0f}")
-    c3.metric("Budget medio altri", f"{avg_other_budget:.1f}")
+    c1.metric("Spesa totale lega", f"{analysis['market_spend']:.0f}")
+    c2.metric("Spesa altri avversari", f"{spent_others:.0f}")
+    c3.metric("Budget medio avversari", f"{avg_other_budget:.1f}")
+
+    if events:
+        st.divider()
+        st.markdown("### 📊 Spesa di Lega per Reparto")
+        ev_df = pd.DataFrame(events)
+        lookup_roles = players_raw.set_index("name_norm")["roles"].to_dict() if players_raw is not None else {}
+        def get_reparto(name_norm):
+            r = str(lookup_roles.get(name_norm, ""))
+            if "Por" in r: return "🧤 Portieri"
+            if any(x in r for x in ["Pc", "A", "T", "W"]): return "🎯 Attacco/Trequarti"
+            if any(x in r for x in ["M", "C"]): return "⚙️ Centrocampo"
+            return "🛡️ Difesa"
+        ev_df["Reparto"] = ev_df["name_norm"].map(get_reparto)
+        rep_summary = ev_df.groupby("Reparto").agg(
+            Acquisti=("price", "count"),
+            Spesa_Totale=("price", "sum"),
+            Prezzo_Medio=("price", "mean"),
+            Prezzo_Max=("price", "max")
+        ).reset_index()
+        rep_summary["Prezzo_Medio"] = rep_summary["Prezzo_Medio"].round(1)
+        rep_summary["% Spesa Lega"] = (rep_summary["Spesa_Totale"] / max(1, analysis["market_spend"]) * 100).round(1).astype(str) + "%"
+        st.dataframe(rep_summary, use_container_width=True, hide_index=True)
+
+        c_top1, c_top2 = st.columns(2)
+        with c_top1:
+            st.markdown("### 💎 Top 5 Acquisti Più Cari dell'Asta")
+            top_sales = ev_df.sort_values("price", ascending=False).head(5)
+            st.dataframe(top_sales[["name", "price", "mine"]].rename(columns={"name": "Giocatore", "price": "Prezzo", "mine": "Mio"}), use_container_width=True, hide_index=True)
+        with c_top2:
+            st.markdown("### 📥 Esporta Dati Asta")
+            st.caption("Scarica il report di tutti i giocatori chiamati finora con acquirente e prezzo battuto.")
+            st.download_button(
+                "Scarica storico completo vendite (.csv)",
+                data=ev_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"storico_aste_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
 
 
 elif page == "Dati & setup":

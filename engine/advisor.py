@@ -17,9 +17,13 @@ def state_frames(players: pd.DataFrame, events: list[dict]) -> tuple[pd.DataFram
 
 
 def analyze_auction(raw_players: pd.DataFrame, events: list[dict], config: AuctionConfig, manual_overweights: list[str] | None = None) -> dict:
-    projected = project_players(raw_players, manual_overweights, config.manual_team_premium)
+    if "expected_fp" in raw_players.columns and "projected_fm" in raw_players.columns:
+        projected = raw_players
+    else:
+        projected = project_players(raw_players, manual_overweights, config.manual_team_premium)
     _, my_roster = state_frames(projected, events)
     market = dynamic_market_values(projected, events, my_roster, config)
+
     exposure, opt = optimize_portfolio(market, events, config)
     market = market.merge(exposure, on="name_norm", how="left")
     market["exposure"] = market["exposure"].fillna(0.0)
