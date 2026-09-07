@@ -4,6 +4,7 @@ import pytest
 
 from engine.advisor import analyze_auction, player_advice
 from engine.config import AuctionConfig
+from engine.tactics import MANTRA_FORMATIONS
 from engine.data_loader import load_bundled_dataset
 from engine.projections import project_players
 from engine.utils import coerce_num, has_any_role
@@ -176,3 +177,71 @@ def test_formations_do_not_double_count_players():
         p("MC1", "M/C"), p("C1", "C"), p("C2", "C"), p("W1", "W"), p("W2", "W/A"), p("APc", "A/Pc"),
     ])
     assert next(f for f in evaluate_formations(versatile) if f["name"] == "4-3-3")["playable"]
+
+
+def _squad_pool(n_per_role=6):
+    """Synthetic pool wide enough to satisfy every squad and XI constraint."""
+    from engine.projections import project_players
+    rows = []
+    roles = ["Por", "Dc", "Dd", "Ds", "E", "M", "C", "W", "T", "A", "Pc"]
+    for r in roles:
+        for k in range(n_per_role):
+            rows.append({
+                "name": f"{r}{k}", "name_norm": f"{r}{k}".lower(), "roles": r,
+                "team": f"T{(len(rows)) % 12}", "fvm": 10 + 4 * k,
+                "pv_25": 30, "fm_25": 6.0 + 0.25 * k, "pv_24": 30, "fm_24": 6.0,
+            })
+    return project_players(pd.DataFrame(rows))
+
+
+def test_optimizer_builds_a_fieldable_eleven():
+    from engine.market import dynamic_market_values
+    from engine.optimizer import optimize_portfolio
+    from engine.tactics import evaluate_formations
+
+    cfg = AuctionConfig()
+    pool = dynamic_market_values(_squad_pool(), [], pd.DataFrame(columns=["roles", "team"]), cfg)
+    exposure, opt = optimize_portfolio(pool, [], cfg, simulations=2)
+
+    assert opt.feasible
+    assert len(opt.selected_names) == cfg.roster_size
+    assert len(opt.starters) == 11
+    assert opt.formation in MANTRA_FORMATIONS
+    # Starters must be part of the squad, and the XI must really be fieldable.
+    assert set(opt.starters).issubset(set(opt.selected_names))
+    squad = pool[pool["name_norm"].isin(opt.selected_names)]
+    assert next(f for f in evaluate_formations(squad) if f["key"] == opt.formation)["playable"]
+    assert exposure["exposure"].between(0, 1).all()
+
+
+def test_bench_weight_shifts_budget_towards_starters():
+    """A lower bench weight must concentrate spending on fewer, better starters."""
+    from engine.market import dynamic_market_values
+    from engine.optimizer import optimize_portfolio
+
+    pool_raw = _squad_pool(8)
+    spend = {}
+    for lam in (0.05, 0.60):
+        cfg = AuctionConfig(bench_weight=lam)
+        pool = dynamic_market_values(pool_raw, [], pd.DataFrame(columns=["roles", "team"]), cfg)
+        _, opt = optimize_portfolio(pool, [], cfg, simulations=1)
+        assert opt.feasible
+        xi = pool[pool["name_norm"].isin(opt.starters)]
+        spend[lam] = float(xi["dynamic_price"].sum())
+    assert spend[0.05] > spend[0.60]
+
+
+def test_optimizer_keeps_players_already_bought():
+    from engine.market import dynamic_market_values
+    from engine.optimizer import optimize_portfolio
+
+    cfg = AuctionConfig()
+    pool_raw = _squad_pool()
+    pool = dynamic_market_values(pool_raw, [], pd.DataFrame(columns=["roles", "team"]), cfg)
+    events = [{"name_norm": "pc0", "price": 30, "mine": True},
+              {"name_norm": "dc0", "price": 12, "mine": False}]
+    _, opt = optimize_portfolio(pool, events, cfg, simulations=1)
+    assert opt.feasible
+    assert "pc0" in opt.selected_names       # mio: resta in rosa
+    assert "dc0" not in opt.selected_names   # venduto ad altri: fuori dal pool
+    assert len(opt.selected_names) == cfg.roster_size

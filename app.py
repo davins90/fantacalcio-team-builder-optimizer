@@ -266,6 +266,25 @@ elif page == "Chi chiamo?":
     st.markdown("### 🎯 Target consigliati")
     st.dataframe(display.head(10), use_container_width=True, hide_index=True)
 
+    opt = analysis["optimizer"]
+    if opt.feasible and opt.starters:
+        st.markdown("### 🧩 L'undici verso cui stai costruendo")
+        st.caption(
+            f"L'ottimizzatore punta al **{opt.formation}** e concentra il budget su questi 11. "
+            f"I restanti {config.roster_size - 11} slot sono panchina, pesata λ = {config.bench_weight:.2f} "
+            "(modificabile in Dati & setup)."
+        )
+        xi = analysis["players"][analysis["players"]["name_norm"].isin(opt.starters)].copy()
+        xi["Già mio"] = xi["name_norm"].isin({e["name_norm"] for e in events if e.get("mine")}).map({True: "✅", False: ""})
+        xi["Prezzo"] = xi["dynamic_price"].round(0).astype(int)
+        xi["Expected FP"] = xi["expected_fp"].round(0).astype(int)
+        st.dataframe(
+            xi[["name", "team", "roles", "Prezzo", "Expected FP", "Già mio"]].rename(
+                columns={"name": "Giocatore", "team": "Squadra", "roles": "Ruoli"}
+            ),
+            use_container_width=True, hide_index=True,
+        )
+
     st.markdown("### 💸 Chiamate budget-drain")
     st.caption("Top costosi che il modello usa poco: utili per far emergere/spendere capitale agli altri, senza inseguirli.")
     drain = analysis["budget_drain"].copy()
@@ -439,6 +458,15 @@ elif page == "Dati & setup":
         target_goalkeepers = c4.number_input("Portieri target", 2, 4, config.target_goalkeepers)
         max_team = c5.number_input("Max giocatori stesso club", 0, 8, config.max_players_per_real_team, help="0 = nessun limite")
         risk = c6.slider("Avversione al rischio", 0.0, 1.0, float(config.risk_aversion), 0.05)
+        bench_weight = st.slider(
+            "Peso della panchina (\u03bb)", 0.05, 0.60, float(config.bench_weight), 0.05,
+            help=(
+                "Quanto valgono i 14 rincalzi rispetto agli 11 titolari nell'ottimizzatore. "
+                "Basso = concentri il budget su pochi titolari forti, panchina povera e pi\u00f9 "
+                "esposta agli infortuni. Alto = rosa pi\u00f9 equilibrata e robusta alle assenze, "
+                "titolari meno esplosivi. 0.30 \u00e8 il punto in cui il guadagno sull'XI si appiattisce."
+            ),
+        )
         if players_raw is not None and "team" in players_raw:
             teams = sorted([x for x in players_raw["team"].dropna().astype(str).unique() if x and x != "nan"])
         else:
@@ -450,7 +478,8 @@ elif page == "Dati & setup":
                 participants=int(participants), starting_budget=int(starting_budget), roster_size=int(roster_size),
                 target_goalkeepers=int(target_goalkeepers), max_players_per_real_team=int(max_team),
                 risk_aversion=float(risk), upside_weight=config.upside_weight, value_weight=config.value_weight,
-                simulations=config.simulations, manual_team_premium=config.manual_team_premium,
+                simulations=config.simulations, bench_weight=float(bench_weight),
+                manual_team_premium=config.manual_team_premium,
             )
             state["config"] = new_cfg.to_dict()
             state["manual_overweights"] = overweights
@@ -525,7 +554,9 @@ elif page == "Modello":
 
 **2. Market engine.** Converte l'FVM su 500 crediti e, dopo ogni vendita, aggiorna un moltiplicatore di inflazione per ruolo con shrinkage verso 1. Aggiunge scarsità e liquidità aggregata.
 
-**3. Portfolio optimizer.** Risolve un problema di ottimizzazione intera con budget, numero giocatori, coperture Mantra e diversificazione per club. Più simulazioni perturbano le proiezioni per ottenere la **portfolio exposure** di ogni giocatore.
+**3. Portfolio optimizer.** Risolve un problema di ottimizzazione intera con budget, numero giocatori, coperture Mantra e diversificazione per club. L'obiettivo è il **miglior XI schierabile**, non la somma dei 25: un titolare vale i suoi expected FP pieni, un rincalzo solo una frazione λ (il *peso della panchina*, regolabile in Dati & setup). Il modello sceglie anche il modulo Mantra verso cui costruire, assegnando ogni giocatore ad al più uno slot dell'undici. Più simulazioni perturbano le proiezioni per ottenere la **portfolio exposure** di ogni giocatore.
+
+Con λ basso concentri il budget su pochi titolari forti; con λ alto compri una rosa più equilibrata e robusta agli infortuni.
 
 **4. Live advisor.** Combina fair value, fit della tua rosa ed exposure. Dopo ogni evento `giocatore + prezzo + MIO/ALTRI` il pool cambia e l'intero portafoglio viene ricalcolato.
 

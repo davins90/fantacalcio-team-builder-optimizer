@@ -14,6 +14,7 @@ class AuctionConfig:
     upside_weight: float = 0.20
     value_weight: float = 0.15
     simulations: int = 8
+    bench_weight: float = 0.30
     manual_team_premium: float = 0.05
 
     @property
