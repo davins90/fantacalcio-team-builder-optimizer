@@ -149,9 +149,23 @@ def _parse_quotes_html(html: str) -> pd.DataFrame:
     return out
 
 
+def _find_player_name_column(table: pd.DataFrame) -> str:
+    candidate_cols = []
+    for col in table.columns:
+        s = table[col].dropna().astype(str).str.strip()
+        if len(s) == 0:
+            continue
+        valid = s[s.str.match(r"^[A-Za-zÀ-ÿ\s\.\'\-]+$") & (s.str.len() >= 3)]
+        if len(valid) >= len(table) * 0.4 and s.nunique() > 25:
+            candidate_cols.append((col, len(valid)))
+    if candidate_cols:
+        return sorted(candidate_cols, key=lambda x: x[1], reverse=True)[0][0]
+    return _pick_column(table, ["calciatore", "nome", "player"]) or table.columns[0]
+
+
 def _parse_stats_html(html: str, suffix: str) -> pd.DataFrame:
     table = _find_table(html, ["calciatore", "pv", "fm"])
-    name_col = _pick_column(table, ["calciatore"]) or table.columns[0]
+    name_col = _find_player_name_column(table)
     team_col = _pick_column(table, ["sq"])
 
     def c(token: str):
@@ -168,7 +182,9 @@ def _parse_stats_html(html: str, suffix: str) -> pd.DataFrame:
     }
     out = pd.DataFrame(cols)
     out["name_norm"] = out["name"].map(normalize_name)
+    out = out[out["name_norm"] != "nan"]
     return out.drop_duplicates("name_norm", keep="first")
+
 
 
 def _load_remote() -> tuple[pd.DataFrame, DataHealth]:

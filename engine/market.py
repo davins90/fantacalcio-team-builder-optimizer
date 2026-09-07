@@ -46,18 +46,22 @@ def role_inflation_posteriors(players: pd.DataFrame, events: list[dict], config:
 
 
 def scarcity_multipliers(players: pd.DataFrame, sold_names: set[str]) -> dict[str, float]:
-    initial: dict[str, int] = defaultdict(int)
-    remaining: dict[str, int] = defaultdict(int)
+    initial: dict[str, float] = defaultdict(float)
+    remaining: dict[str, float] = defaultdict(float)
     for _, row in players.iterrows():
+        fvm = float(row.get("fvm") or 1)
+        if fvm < 2.0:
+            continue
+        weight = math.sqrt(fvm)
         group = primary_market_role(row.get("roles", ""))
-        initial[group] += 1
+        initial[group] += weight
         if row["name_norm"] not in sold_names:
-            remaining[group] += 1
+            remaining[group] += weight
     out = {}
     for role, total in initial.items():
-        frac = remaining[role] / max(1, total)
-        # Scarcity only becomes meaningful once the pool has materially thinned.
-        out[role] = float(1.0 + 0.16 * (1.0 - frac) ** 1.7)
+        frac = remaining[role] / max(1.0, total)
+        # Scarcity rises up to +22% as starting-caliber talent in that role depletes
+        out[role] = float(1.0 + 0.22 * ((1.0 - frac) ** 1.5))
     return out
 
 
@@ -74,30 +78,44 @@ def liquidity_multiplier(events: list[dict], config: AuctionConfig) -> float:
 def fit_multiplier(row: pd.Series, my_roster: pd.DataFrame, config: AuctionConfig) -> float:
     roles = set(parse_roles(row.get("roles", "")))
     if not roles:
-        return 0.94
+        return 0.90
 
     def count_any(target):
         if my_roster.empty:
             return 0
         return sum(bool(set(parse_roles(r)).intersection(target)) for r in my_roster["roles"])
 
+    cur_por = count_any({"Por"})
+    if roles == {"Por"} and cur_por >= config.target_goalkeepers:
+        return 0.15  # Goalkeeper department already full
+
     needs = {
-        "Por": max(0, config.target_goalkeepers - count_any({"Por"})),
+        "Por": max(0, config.target_goalkeepers - cur_por),
         "Dc": max(0, 4 - count_any({"Dc"})),
-        "FLANK": max(0, 4 - count_any({"Dd", "Ds", "B", "E"})),
-        "MID": max(0, 4 - count_any({"M", "C"})),
-        "CREATIVE": max(0, 4 - count_any({"W", "T", "A"})),
-        "FWD": max(0, 4 - count_any({"A", "Pc"})),
+        "Dd": max(0, 2 - count_any({"Dd"})),
+        "Ds": max(0, 2 - count_any({"Ds"})),
+        "E": max(0, 2 - count_any({"E"})),
+        "M": max(0, 2 - count_any({"M"})),
+        "C": max(0, 3 - count_any({"C"})),
+        "Pc": max(0, 2 - count_any({"Pc"})),
+        "CREATIVE": max(0, 3 - count_any({"W", "T", "A"})),
     }
     hit = 0
     if "Por" in roles and needs["Por"] > 0: hit += 1
     if "Dc" in roles and needs["Dc"] > 0: hit += 1
-    if roles.intersection({"Dd", "Ds", "B", "E"}) and needs["FLANK"] > 0: hit += 1
-    if roles.intersection({"M", "C"}) and needs["MID"] > 0: hit += 1
+    if "Dd" in roles and needs["Dd"] > 0: hit += 1
+    if "Ds" in roles and needs["Ds"] > 0: hit += 1
+    if "E" in roles and needs["E"] > 0: hit += 1
+    if "M" in roles and needs["M"] > 0: hit += 1
+    if "C" in roles and needs["C"] > 0: hit += 1
+    if "Pc" in roles and needs["Pc"] > 0: hit += 1
     if roles.intersection({"W", "T", "A"}) and needs["CREATIVE"] > 0: hit += 1
-    if roles.intersection({"A", "Pc"}) and needs["FWD"] > 0: hit += 1
+
     flexibility = min(0.04, max(0, len(roles) - 1) * 0.02)
-    return float(1.0 + min(0.08, hit * 0.025) + flexibility)
+    if hit == 0:
+        return float(0.85 + flexibility)
+    return float(1.0 + min(0.10, hit * 0.03) + flexibility)
+
 
 
 def dynamic_market_values(players: pd.DataFrame, events: list[dict], my_roster: pd.DataFrame, config: AuctionConfig) -> pd.DataFrame:

@@ -21,7 +21,11 @@ class LocalStateStore:
             return {}
 
     def save_state(self, state: dict) -> None:
-        self.path.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        current = self.load_state()
+        merged = dict(current)
+        merged.update(state)
+        self.path.write_text(json.dumps(merged, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
 
     def load_dataset(self) -> pd.DataFrame | None:
         state = self.load_state()

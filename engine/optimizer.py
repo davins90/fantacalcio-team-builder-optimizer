@@ -56,19 +56,32 @@ def _solve_once(
     # Budget.
     constraints.append(LinearConstraint(price.reshape(1, -1), [-np.inf], [budget_left]))
 
-    role_requirements = [
-        ({"Por"}, config.target_goalkeepers),
-        ({"Dc"}, 4),
-        ({"Dd", "Ds", "B", "E"}, 4),
-        ({"M", "C"}, 4),
-        ({"W", "T", "A"}, 4),
-        ({"A", "Pc"}, 4),
-    ]
+    # Goalkeeper constraint: strictly fill needed goalkeepers up to target, never exceed.
+    cur_por = _current_count(my_roster, {"Por"})
+    needed_por = max(0, config.target_goalkeepers - cur_por)
+    needed_por = min(needed_por, need)
+    por_mask = np.array([1.0 if has_any_role(v, {"Por"}) else 0.0 for v in available["roles"]])
+    if needed_por > 0:
+        constraints.append(LinearConstraint(por_mask.reshape(1, -1), [needed_por], [needed_por]))
+    else:
+        constraints.append(LinearConstraint(por_mask.reshape(1, -1), [-np.inf], [0]))
+
     if not relax:
+        role_requirements = [
+            ({"Dc"}, 4),
+            ({"Dd"}, 2),
+            ({"Ds"}, 2),
+            ({"E", "W"}, 2),
+            ({"M"}, 2),
+            ({"C"}, 3),
+            ({"Pc"}, 2),
+            ({"W", "T", "A"}, 3),
+        ]
         for roles, target in role_requirements:
             deficit = max(0, target - _current_count(my_roster, roles))
             if deficit <= 0:
                 continue
+            deficit = min(deficit, need - (needed_por if "Por" not in roles else 0))
             mask = np.array([1.0 if has_any_role(v, roles) else 0.0 for v in available["roles"]])
             if mask.sum() >= deficit:
                 constraints.append(LinearConstraint(mask.reshape(1, -1), [deficit], [np.inf]))
@@ -82,6 +95,17 @@ def _solve_once(
                 positions = [available.index.get_loc(i) for i in idx]
                 mask[positions] = 1
                 constraints.append(LinearConstraint(mask.reshape(1, -1), [-np.inf], [cap]))
+    else:
+        # Soft relaxed constraints: maintain minimal balance across departments
+        non_por_need = need - needed_por
+        if non_por_need >= 3:
+            for roles in [{"Dc", "Dd", "Ds", "B", "E"}, {"M", "C"}, {"W", "T", "A", "Pc"}]:
+                deficit = max(0, 1 - _current_count(my_roster, roles))
+                if deficit > 0:
+                    mask = np.array([1.0 if has_any_role(v, roles) else 0.0 for v in available["roles"]])
+                    if mask.sum() >= deficit:
+                        constraints.append(LinearConstraint(mask.reshape(1, -1), [deficit], [np.inf]))
+
 
     result = milp(
         c=c,

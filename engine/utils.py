@@ -66,13 +66,37 @@ def primary_market_role(value) -> str:
 def coerce_num(series: pd.Series) -> pd.Series:
     if series is None:
         return pd.Series(dtype=float)
-    return pd.to_numeric(
-        series.astype(str)
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
-        .str.extract(r"(-?\d+(?:\.\d+)?)", expand=False),
-        errors="coerce",
-    )
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+
+    def _convert_val(v):
+        if pd.isna(v):
+            return np.nan
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip()
+        if not s:
+            return np.nan
+        if "." in s and "," in s:
+            # Italian format with thousands dot: e.g. 1.250,50
+            s = s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            # Italian decimal: e.g. 6,75
+            s = s.replace(",", ".")
+        elif "." in s:
+            # If formatted like 1.000 (thousands), remove dot; otherwise it's a decimal dot
+            if re.fullmatch(r"^\d{1,3}\.\d{3}$", s):
+                s = s.replace(".", "")
+        m = re.search(r"(-?\d+(?:\.\d+)?)", s)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return np.nan
+        return np.nan
+
+    return series.map(_convert_val).astype(float)
+
 
 
 def robust_minmax(series: pd.Series, low_q: float = 0.05, high_q: float = 0.95) -> pd.Series:

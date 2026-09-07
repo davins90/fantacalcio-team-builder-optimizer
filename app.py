@@ -145,7 +145,11 @@ if page == "Asta live":
                 a4.metric("Expected FP", f"{adv['expected_fp']:.0f}")
                 a5.metric("Risk", f"{adv['risk']:.0%}")
 
-                if adv["decision"] == "BUY":
+                if adv["decision"] == "ROSTER_FULL":
+                    st.error("🚫 **ROSA COMPLETA** — Hai già completato tutti i posti disponibili in rosa.")
+                elif adv["decision"] == "OUT_OF_BUDGET":
+                    st.error("⚠️ **BUDGET INSUFFICIENTE** — Devi conservare almeno 1 credito per ogni slot ancora vuoto.")
+                elif adv["decision"] == "BUY":
                     st.success(f"🟢 **BUY** — target importante nei portafogli ottimali. Non superare {adv['max_bid']}.")
                 elif adv["decision"] == "VALUE":
                     st.info(f"🟡 **VALUE** — interessante al prezzo giusto. Stop consigliato: {adv['max_bid']}.")
@@ -159,12 +163,22 @@ if page == "Asta live":
 
                 st.markdown("#### Registra la vendita")
                 with st.form("sale_form", clear_on_submit=True):
-                    final_price = st.number_input("Prezzo finale", min_value=1, max_value=config.starting_budget, value=max(1, min(adv["max_bid"], config.starting_budget)), step=1)
+                    initial_val = max(1, min(adv["max_bid"] or 1, config.starting_budget))
+                    final_price = st.number_input("Prezzo finale", min_value=1, max_value=config.starting_budget, value=initial_val, step=1)
                     mine = st.radio("Acquirente", ["ALTRI", "MIO"], horizontal=True)
                     submitted = st.form_submit_button("Registra acquisto", use_container_width=True)
                     if submitted:
-                        if mine == "MIO" and final_price > analysis["my_budget_left"]:
-                            st.error("Prezzo superiore al tuo budget residuo.")
+                        slots_left = config.roster_size - len(analysis["my_roster"])
+                        if mine == "MIO" and slots_left <= 0:
+                            st.error("La tua rosa ha già raggiunto il limite massimo di giocatori!")
+                        elif mine == "MIO" and final_price > analysis["my_budget_left"]:
+                            st.error(f"Prezzo ({final_price}) superiore al tuo budget residuo ({analysis['my_budget_left']:.0f}).")
+                        elif mine == "MIO" and final_price > (analysis["my_budget_left"] - (slots_left - 1)):
+                            max_bid_legal = max(0, int(analysis["my_budget_left"] - (slots_left - 1)))
+                            st.error(
+                                f"Prezzo non valido: devi tenere almeno 1 credito per ciascuno dei restanti "
+                                f"{slots_left - 1} slot (massimo consentito: {max_bid_legal} crediti)."
+                            )
                         else:
                             event = {
                                 "name_norm": selected_label,
@@ -176,6 +190,7 @@ if page == "Asta live":
                             state["events"].append(event)
                             persist_state()
                             st.rerun()
+
 
     if events:
         st.divider()

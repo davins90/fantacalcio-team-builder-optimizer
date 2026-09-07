@@ -64,17 +64,35 @@ def project_players(df: pd.DataFrame, manual_overweights: list[str] | None = Non
     projected_fm = projected_fm + 0.12 * work["team_factor"]
     projected_fm = projected_fm * np.where(work["team"].isin(manual_overweights), 1.0 + manual_premium, 1.0)
 
-    # Expected availability. New arrivals without history are shrunk to 27 appearances.
-    pv25 = work["pv_25"].fillna(27)
-    pv24 = work["pv_24"].fillna(pv25)
-    expected_apps = (0.72 * pv25 + 0.28 * pv24).clip(10, 36)
-    # Small current-season availability update, deliberately weak after only a few rounds.
-    expected_apps = (expected_apps + (work["pv_26"].fillna(0) - 1.5) * 0.35).clip(10, 36)
+    # Expected availability.
+    fvm_val = work["fvm"].fillna(1.0).clip(lower=1.0)
+    # Market prior: reserve players (FVM ~ 1-2) expect 1-3 appearances; regular starters expect 25-33
+    market_implied_pv = np.clip(1.5 + 30.0 * (fvm_val / (fvm_val + 35.0)), 1.0, 34.0)
 
-    experience = ((work["pv_25"].fillna(0) + work["pv_24"].fillna(0)) / 60.0).clip(0, 1)
+    has_pv25 = work["pv_25"].notna()
+    has_pv24 = work["pv_24"].notna()
+    hist_pv = pd.Series(np.nan, index=work.index, dtype=float)
+    both_pv = has_pv25 & has_pv24
+    hist_pv.loc[both_pv] = 0.72 * work.loc[both_pv, "pv_25"] + 0.28 * work.loc[both_pv, "pv_24"]
+    hist_pv.loc[has_pv25 & ~has_pv24] = work.loc[has_pv25 & ~has_pv24, "pv_25"]
+    hist_pv.loc[~has_pv25 & has_pv24] = work.loc[~has_pv25 & has_pv24, "pv_24"]
+
+    # Bayesian shrinkage toward market implied appearances:
+    # Use historical evidence when present (shrunk slightly to prior); otherwise use prior
+    pv_weight = np.where(hist_pv.notna(), 0.85, 0.0)
+    expected_apps = np.where(hist_pv.notna(), hist_pv * pv_weight + market_implied_pv * (1.0 - pv_weight), market_implied_pv)
+    expected_apps = pd.Series(expected_apps, index=work.index, dtype=float)
+
+    # Small current-season availability update
+    pv26 = work["pv_26"].fillna(0)
+    expected_apps = (expected_apps + (pv26 - 1.0).clip(lower=-2.0, upper=4.0) * 0.35).clip(1.0, 36.0)
+
+    total_pv = work["pv_25"].fillna(0) + work["pv_24"].fillna(0)
+    experience = (total_pv / 60.0).clip(0, 1)
     current_gap = (current_fm - hist).fillna(0).clip(-2.5, 2.5)
-    risk = (0.70 * (1 - experience) + 0.30 * (work["pv_25"].fillna(0) < 15).astype(float)).clip(0, 1)
-    upside = (0.45 * robust_minmax(current_gap) + 0.35 * fvm_rank + 0.20 * risk).clip(0, 1)
+    fvm_stabilizer = (fvm_val / (fvm_val + 50.0)).clip(0, 0.5)
+    risk = (0.65 * (1.0 - experience) + 0.20 * (work["pv_25"].fillna(0) < 15).astype(float) - 0.15 * fvm_stabilizer).clip(0.08, 0.95)
+    upside = (0.40 * robust_minmax(current_gap) + 0.40 * fvm_rank + 0.20 * risk).clip(0, 1)
 
     work["projected_fm"] = projected_fm.clip(5.0, 9.5)
     work["expected_apps"] = expected_apps
